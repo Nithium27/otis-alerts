@@ -1,0 +1,29 @@
+# Builds the Android app and publishes it as the latest release:
+#   https://github.com/Nithium27/otis-alerts/releases/latest/download/otis-alerts.apk
+name: Android app
+on:
+  push:
+    branches: [main]
+    paths: ["android/**", "index.html", "manifest.webmanifest", "icon-*.png", ".github/workflows/android.yml"]
+  workflow_dispatch:
+permissions:
+  contents: write            # only to create the release
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Get the code (plain git, no third-party actions)
+        run: |
+          git init -q .
+          git fetch -q --depth 1 "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git checkout -q FETCH_HEAD
+      - name: Build and sign the APK
+        run: bash android/build.sh
+      - name: Publish it as the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v$GITHUB_RUN_NUMBER" otis-alerts.apk --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Otis alerts $GITHUB_RUN_NUMBER" --latest \
+            --notes "On your Android phone: tap otis-alerts.apk below, then Install. Updating from an older version: uninstall the old app first (every build has its own signing key), then set it up again."
