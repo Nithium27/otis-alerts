@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<!-- Only the script below may run (by its sha256). If you edit the script, tests/test_phone.py prints the new hash. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-/i6fcaJRMKWSZywosjFNdWxWNHmsdjzlGzzJj2cLGqg='; style-src 'unsafe-inline'; img-src 'self'; manifest-src 'self'; connect-src https: http://localhost:* http://127.0.0.1:*; base-uri 'none'; form-action 'none'">
+<title>Otis alerts</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<meta name="theme-color" content="#0e1014">
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --fg:#15171c; --muted:#5f6b7a; --line:#dfe3e8; --ok:#0f7b55; --wait:#a15c00; --bad:#c0153f; --accent:#2556d1; color-scheme:light dark; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0e1014; --card:#181b21; --fg:#e7e9ec; --muted:#9aa4b2; --line:#2a2f38; --ok:#3ccb8f; --wait:#f0a020; --bad:#ff5c7f; --accent:#7ea3ff; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font:16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background:var(--bg); color:var(--fg); }
+  header { position:sticky; top:0; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; background:var(--bg); border-bottom:1px solid var(--line); }
+  h1 { font-size:18px; margin:0; }
+  h2 { font-size:17px; margin:0 0 6px; }
+  .pill { font-size:13px; padding:3px 10px; border-radius:999px; border:1px solid var(--line); color:var(--muted); white-space:nowrap; }
+  .pill.ok { color:var(--ok); border-color:var(--ok); }
+  .pill.wait { color:var(--wait); border-color:var(--wait); }
+  .pill.bad { color:var(--bad); border-color:var(--bad); }
+  main { max-width:640px; margin:0 auto; padding:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin:0 0 12px; }
+  .muted { color:var(--muted); font-size:14px; }
+  .err { color:var(--bad); }
+  label { display:block; font-size:14px; color:var(--muted); margin:14px 0 4px; }
+  input { width:100%; font:15px ui-monospace, Consolas, monospace; padding:10px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--fg); }
+  button { font:inherit; padding:10px 16px; border-radius:8px; border:1px solid var(--line); background:var(--card); color:var(--fg); }
+  button.primary { width:100%; margin-top:18px; background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.danger { color:var(--bad); }
+  ol { list-style:none; margin:0; padding:0; display:grid; gap:10px; }
+  li { background:var(--card); border:1px solid var(--line); border-left:4px solid var(--muted); border-radius:10px; padding:10px 12px; }
+  li.lvl-alert, li.error { border-left-color:var(--bad); }
+  li.lvl-warning, li.lvl-approval { border-left-color:var(--wait); }
+  li.error .text { color:var(--bad); }
+  .meta { display:flex; justify-content:space-between; gap:8px; font-size:13px; color:var(--muted); }
+  .text { margin-top:3px; overflow-wrap:anywhere; }
+  footer { display:flex; justify-content:flex-end; margin-top:24px; }
+</style>
+</head>
+<body>
+<header><h1>Otis alerts</h1><span id="status" class="pill">starting&hellip;</span></header>
+<main>
+  <p id="boot" class="card muted">If this text stays, the page's script was blocked. Copy <code>phone/index.html</code> to the phone again without editing it.</p>
+  <p id="fatal" class="card err" hidden></p>
+  <section id="setup" class="card" hidden>
+    <h2>Set up this phone</h2>
+    <p class="muted">Paste what <code>python -m otis.hub phone-setup</code> printed. It is saved only in this browser on this phone.</p>
+    <label for="key">Key, or the whole setup code</label>
+    <input id="key" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <label for="topic">Topic</label>
+    <input id="topic" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <label for="server">Server</label>
+    <input id="server" value="https://ntfy.sh" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <button id="save" class="primary">Save and connect</button>
+    <p id="setup-error" class="err" role="alert"></p>
+  </section>
+  <section id="feed" hidden>
+    <p id="empty" class="muted">No alerts yet. Keep this page open to receive them.</p>
+    <ol id="alerts"></ol>
+    <footer><button id="clear" class="danger">Clear key</button></footer>
+  </section>
+</main>
+<script>
+"use strict";
+// Must match otis/phone_notify.py
+const AAD_PREFIX = "otis-phone-v1", MAX_AGE = 12 * 3600, MAX_SKEW = 300, MAX_BODY = 8000;
+const TOPIC_RE = /^[A-Za-z0-9_-]{24,64}$/, SETUP_PREFIX = "OTISPHONE1:", MAX_SEEN = 1000, MAX_SHOWN = 200;
+const $ = id => document.getElementById(id);
+
+const saved = {                       // localStorage on this phone only
+  get(k) { try { return localStorage.getItem("otis." + k); } catch (e) { return null; } },
+  set(k, v) { try { localStorage.setItem("otis." + k, v); } catch (e) {} },
+  wipe() { try { ["key", "topic", "server", "seen", "since"].forEach(k => localStorage.removeItem("otis." + k)); } catch (e) {} },
+};
+
+function unb64(s) {
+  s = String(s).trim().replace(/-/g, "+").replace(/_/g, "/");
+  while (s.length % 4) s += "=";
+  return Uint8Array.from(atob(s), c => c.charCodeAt(0));
+}
+function b64(bytes) { return btoa(String.fromCharCode(...bytes)); }
+function when(t) { return new Date(t * 1000).toLocaleString(); }
+
+function checkServer(url) {
+  const u = new URL(String(url).trim());
+  const local = u.hostname === "localhost" || u.hostname === "127.0.0.1";
+  if (!(u.protocol === "https:" || (u.protocol === "http:" && local)) || u.username || u.password || u.search || u.hash)
+    throw new Error("The server must look like https://ntfy.sh");
+  return u.href.replace(/\/+$/, "");
+}
+
+// The same checks as open_message() in otis/phone_notify.py
+async function openMessage(key, topic, body) {
+  const junk = new Error("Could not decrypt a message: it is not an Otis alert");
+  if (body.length > MAX_BODY) throw junk;
+  let m, nonce, ct, pt;
+  try { m = JSON.parse(body); } catch (e) { throw junk; }
+  if (!m || m.v !== 1 || !Number.isInteger(m.t) || typeof m.n !== "string" || typeof m.c !== "string") throw junk;
+  try { nonce = unb64(m.n); ct = unb64(m.c); } catch (e) { throw junk; }
+  if (nonce.length !== 12) throw junk;
+  try {
+    const aad = new TextEncoder().encode(AAD_PREFIX + "\n" + topic + "\n" + m.t);
+    pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: nonce, additionalData: aad, tagLength: 128 }, key, ct);
+  } catch (e) { throw new Error("Could not decrypt a message: wrong key, or it was altered on the way"); }
+  const now = Date.now() / 1000;      // m.t is authenticated now, so it can be trusted
+  if (m.t > now + MAX_SKEW || now - m.t > MAX_AGE) throw new Error("Rejected an old alert dated " + when(m.t) + " (possible replay)");
+  const a = JSON.parse(new TextDecoder().decode(pt));
+  return { device: String(a.d), level: String(a.l), text: String(a.m), time: m.t, nonce: b64(nonce) };
+}
+
+let cfg = null, key = null, es = null, timer = null, backoff = 2000, unread = 0, chain = Promise.resolve();
+let seen = [];                        // [nonce, ntfy id] of accepted alerts: spots replays, survives reloads
+
+function setStatus(text, kind) { $("status").textContent = text; $("status").className = "pill " + (kind || ""); }
+
+function showSetup(error) {
+  disconnect();
+  $("setup").hidden = false;
+  $("feed").hidden = true;
+  $("setup-error").textContent = error || "";
+  setStatus("not set up");
+}
+
+async function start() {
+  cfg = { key: saved.get("key"), topic: saved.get("topic"), server: saved.get("server") };
+  if (!cfg.key || !cfg.topic || !cfg.server) return showSetup();
+  try {
+    key = await crypto.subtle.importKey("raw", unb64(cfg.key), "AES-GCM", false, ["decrypt"]);
+  } catch (e) { return showSetup("The saved key is not valid. Paste it again."); }
+  try { seen = JSON.parse(saved.get("seen") || "[]").slice(-MAX_SEEN); } catch (e) { seen = []; }
+  $("setup").hidden = true;
+  $("feed").hidden = false;
+  connect();
+}
+
+function disconnect() { clearTimeout(timer); if (es) { es.close(); es = null; } }
+
+function connect() {
+  disconnect();
+  const since = saved.get("since");   // catch up on what arrived while the page was closed
+  es = new EventSource(cfg.server + "/" + cfg.topic + "/sse" + (since ? "?since=" + encodeURIComponent(since) : ""));
+  setStatus("connecting\u2026", "wait");
+  es.onopen = () => { backoff = 2000; setStatus("connected", "ok"); };
+  es.onmessage = e => { chain = chain.then(() => handle(e.data)); };   // one at a time, in order
+  es.onerror = () => {
+    disconnect();
+    setStatus("offline, retrying in " + backoff / 1000 + " s", "bad");
+    timer = setTimeout(connect, backoff);
+    backoff = Math.min(backoff * 2, 64000);
+  };
+}
+
+async function handle(data) {
+  let ev;
+  try { ev = JSON.parse(data); } catch (e) { return; }
+  if (!ev || ev.event !== "message" || typeof ev.message !== "string") return;
+  if (Number.isInteger(ev.time) && ev.time > Number(saved.get("since") || 0)) saved.set("since", String(ev.time));
+  if (seen.some(s => s[1] === String(ev.id))) return;               // same ntfy message again after a reconnect
+  let a = null;
+  try {
+    a = await openMessage(key, cfg.topic, ev.message);
+    if (seen.some(s => s[0] === a.nonce)) throw new Error("Rejected a replayed alert dated " + when(a.time));
+    add(a);
+  } catch (e) {
+    a = null;
+    add({ error: e.message, time: Date.now() / 1000 });
+  }
+  seen = seen.concat([[a ? a.nonce : "", String(ev.id)]]).slice(-MAX_SEEN);   // problems are shown once too
+  saved.set("seen", JSON.stringify(seen));
+}
+
+function add(a) {
+  const li = document.createElement("li"), meta = document.createElement("div"), text = document.createElement("div");
+  const who = document.createElement("span"), at = document.createElement("time");
+  meta.className = "meta";
+  text.className = "text";
+  at.textContent = when(a.time);
+  if (a.error) {
+    li.className = "error";
+    who.textContent = "\u26a0 problem";
+    text.textContent = a.error;
+  } else {                            // textContent only: alert text is never treated as HTML
+    li.className = "lvl-" + (a.level.toLowerCase().replace(/[^a-z]/g, "") || "info");
+    who.textContent = a.device + " \u00b7 " + a.level;
+    text.textContent = a.text;
+  }
+  meta.append(who, at);
+  li.append(meta, text);
+  $("alerts").prepend(li);
+  while ($("alerts").children.length > MAX_SHOWN) $("alerts").lastChild.remove();
+  $("empty").hidden = true;
+  if (document.hidden) { unread++; document.title = "(" + unread + ") Otis alerts"; }
+  if (!a.error && a.level === "alert" && navigator.vibrate) navigator.vibrate([200, 100, 200]);
+}
+
+$("save").addEventListener("click", async () => {
+  try {
+    let k = $("key").value.trim(), t = $("topic").value.trim(), s = $("server").value.trim() || "https://ntfy.sh";
+    if (k.startsWith(SETUP_PREFIX)) {
+      let c;
+      try { c = JSON.parse(new TextDecoder().decode(unb64(k.slice(SETUP_PREFIX.length)))); }
+      catch (e) { throw new Error("That setup code is not right. Copy the whole line."); }
+      k = c.k; t = c.t; s = c.s;
+    }
+    let raw = null;
+    try { raw = unb64(k); } catch (e) {}
+    if (!raw || raw.length !== 32) throw new Error("That key is not right: it is 44 characters and ends with '='.");
+    if (!TOPIC_RE.test(String(t))) throw new Error("That topic is not right: 24-64 letters, digits, - or _.");
+    const server = checkServer(s);
+    saved.set("key", b64(raw)); saved.set("topic", t); saved.set("server", server);
+    saved.set("seen", "[]"); saved.set("since", "");
+    if (saved.get("key") !== b64(raw)) throw new Error("This browser does not let the page save the key (private mode?).");
+    $("key").value = "";
+    await start();
+  } catch (e) { $("setup-error").textContent = e.message; }
+});
+
+$("clear").addEventListener("click", () => {
+  if (!confirm("Remove the key from this phone? You will have to paste it again to see alerts.")) return;
+  saved.wipe();
+  key = cfg = null;
+  seen = [];
+  $("alerts").replaceChildren();
+  $("empty").hidden = false;
+  $("topic").value = "";
+  showSetup();
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  unread = 0;
+  document.title = "Otis alerts";
+  if (key && !es) { backoff = 2000; connect(); }     // phones drop connections in the background
+});
+
+// A setup link (the QR code from `phone-setup --page`) carries the setup code after "#", which never leaves the phone.
+function setupFromLink() {
+  if (!location.hash.startsWith("#" + SETUP_PREFIX)) return false;
+  let code = "";
+  try { code = decodeURIComponent(location.hash.slice(1)); } catch (e) {}
+  history.replaceState(null, "", location.pathname + location.search);
+  showSetup("Setup code received. Tap Save and connect.");
+  $("key").value = code;
+  return true;
+}
+
+$("boot").hidden = true;
+if (!window.isSecureContext || !window.crypto || !crypto.subtle) {
+  $("fatal").hidden = false;
+  $("fatal").textContent = "This browser blocks encryption for a page opened this way. Open the page from an https:// address instead (README, section \"Phone page\").";
+  setStatus("cannot run", "bad");
+} else {
+  window.addEventListener("hashchange", setupFromLink);   // the app was already open when the link came
+  if (!setupFromLink()) start();
+}
+</script>
+</body>
+</html>
