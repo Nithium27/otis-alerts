@@ -7,8 +7,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 SDK="${ANDROID_HOME:?set ANDROID_HOME to the Android SDK}"
-BT="$(ls -d "$SDK"/build-tools/* | sort -V | tail -1)"
-JAR="$(ls -d "$SDK"/platforms/android-* | sort -V | tail -1)/android.jar"
+BT="$(ls -d "$SDK"/build-tools/* | grep -E '/[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)"        # newest stable,
+JAR="$(ls -d "$SDK"/platforms/android-* | grep -E '/android-[0-9]+$' | sort -V | tail -1)/android.jar"  # not a beta
 VERSION="${GITHUB_RUN_NUMBER:-1}"
 OUT=build
 echo "build-tools: $BT"
